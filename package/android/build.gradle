@@ -32,6 +32,21 @@ def getExtOrIntegerDefault(name) {
 // Read extensions from gradle.properties (set by Expo config plugin)
 def duckdbExtensions = project.findProperty('RNDuckDB_extensions') ?: ''
 
+// Prebuilt native libraries: when the package ships compiled libRNDuckDB.so files
+// (published from CI to GitHub Packages), consumers bundle them directly instead of
+// recompiling DuckDB from source via CMake. Opt out with -PRNDuckDB_prebuilt=false.
+def prebuiltJniLibsDir = file("src/main/jniLibs")
+def hasPrebuiltLibs = {
+  prebuiltJniLibsDir.exists() &&
+    !fileTree(dir: prebuiltJniLibsDir, include: "**/libRNDuckDB.so").isEmpty()
+}()
+def usePrebuilt = project.hasProperty('RNDuckDB_prebuilt')
+  ? project.getProperty('RNDuckDB_prebuilt').toString().toBoolean()
+  : hasPrebuiltLibs
+if (usePrebuilt) {
+  logger.lifecycle("[RNDuckDB] Using prebuilt native libraries from src/main/jniLibs (CMake build skipped)")
+}
+
 def supportsNamespace() {
   def parsed = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION.tokenize('.')
   def major = parsed[0].toInteger()
@@ -66,23 +81,27 @@ android {
     minSdkVersion getExtOrIntegerDefault("minSdkVersion")
     targetSdkVersion getExtOrIntegerDefault("targetSdkVersion")
 
-    externalNativeBuild {
-      cmake {
-        arguments "-DANDROID_STL=c++_shared",
-          "-DANDROID_TOOLCHAIN=clang",
-          "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
-          "-DAPP_ROOT_DIR=${rootProject.projectDir.parentFile.absolutePath}",
-          "-DDUCKDB_EXTENSIONS=${duckdbExtensions}",
-          "-DANDROID_NDK_FOR_HTTPFS=${android.ndkDirectory}"
-        abiFilters (*reactNativeArchitectures())
+    if (!usePrebuilt) {
+      externalNativeBuild {
+        cmake {
+          arguments "-DANDROID_STL=c++_shared",
+            "-DANDROID_TOOLCHAIN=clang",
+            "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
+            "-DAPP_ROOT_DIR=${rootProject.projectDir.parentFile.absolutePath}",
+            "-DDUCKDB_EXTENSIONS=${duckdbExtensions}",
+            "-DANDROID_NDK_FOR_HTTPFS=${android.ndkDirectory}"
+          abiFilters (*reactNativeArchitectures())
+        }
       }
     }
   }
 
-  externalNativeBuild {
-    cmake {
-      path "CMakeLists.txt"
-      version = System.getenv("CMAKE_VERSION") ?: "3.22.1"
+  if (!usePrebuilt) {
+    externalNativeBuild {
+      cmake {
+        path "CMakeLists.txt"
+        version = System.getenv("CMAKE_VERSION") ?: "3.22.1"
+      }
     }
   }
 
