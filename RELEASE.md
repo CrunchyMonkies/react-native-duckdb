@@ -5,7 +5,7 @@ There are **two** independent release channels:
 | Channel | Trigger | Registry | Native code |
 | --- | --- | --- | --- |
 | **Public (npm.org)** | push a `v*` tag | npmjs.org, package name `react-native-duckdb` | source only — compiled on the consumer's machine |
-| **CrunchyMonkies prebuilt** | push to the `production` branch | GitHub Packages, scoped name `@crunchymonkies/react-native-duckdb` | prebuilt `libRNDuckDB.so` for all four Android ABIs, bundled in the tarball |
+| **CrunchyMonkies prebuilt** | push to the `production` branch | npm on GitHub Packages (`@crunchymonkies/react-native-duckdb`) + prebuilt `.so` on public GitHub Releases | Gradle downloads the matching `libRNDuckDB.so` per ABI from the Release at build time (falls back to source) |
 
 The public tag flow is described below. The prebuilt Android flow is described in
 [Prebuilt Android release (GitHub Packages)](#prebuilt-android-release-github-packages).
@@ -87,48 +87,92 @@ The release pipeline includes multiple safeguards:
 - **`npm pack --dry-run`** verification step in CI
 - **No pre-release complexity** — every publish goes to `latest`, no accidental beta tags
 
-## Prebuilt Android release (GitHub Packages)
+## Prebuilt Android release (download at build time)
 
-The [`production-release` workflow](.github/workflows/production-release.yml) publishes a
-**prebuilt Android** build to the CrunchyMonkies GitHub Packages npm registry. Unlike the public
-npm package (which compiles DuckDB on the consumer's machine), this package ships compiled
-`libRNDuckDB.so` binaries so consuming apps skip the native build entirely.
+The [`production-release` workflow](.github/workflows/production-release.yml) cross-compiles the
+native Android library for two **feature sets** (`core` and `all`) and uploads them to a **public
+GitHub Release**. Consumer Gradle builds select a feature set via the `DUCKDB_FEATURES` env var and
+**download the matching `libRNDuckDB.so` for each ABI at build time** instead of compiling DuckDB
+from source. The scoped npm package (`@crunchymonkies/react-native-duckdb`, on GitHub Packages)
+carries the JS code plus the Gradle logic that performs the download (and the source-build fallback).
+
+### `DUCKDB_FEATURES`
+
+| `DUCKDB_FEATURES`            | Behavior |
+| --------------------------- | -------- |
+| `core` (default when unset) | Download the prebuilt **core** release; on failure → clone DuckDB + source-build the core set |
+| `all`                       | Download the prebuilt **all** release; on failure → clone DuckDB + source-build the full set |
+| `ext_a,ext_b,…`             | Custom comma-delimited extension list → **always** clone DuckDB + source-build exactly those |
+
+Feature-set definitions (kept in sync between `package/android/build.gradle` and this workflow):
+
+- **core** = `core_functions,parquet,json`
+- **all**  = `core_functions,parquet,json,icu,autocomplete,tpch,tpcds,delta,sqlite_scanner,httpfs,fts,vss`
+
+Set it as an environment variable (`DUCKDB_FEATURES=all ./gradlew …` / in CI) or as a Gradle
+property (`-PDUCKDB_FEATURES=all`).
 
 ### How to release
 
 1. Bump `version` in `package/package.json` and merge to the `production` branch.
 2. Push `production` (or run the workflow manually via **workflow_dispatch**). The version is taken
-   from `package/package.json` as-is — publishing fails if that version already exists in the
-   registry, so always bump first.
-3. Confirm the package appears under
+   from `package/package.json` as-is and is used for both the npm version and the Release tag
+   (`vX.Y.Z`) — always bump first.
+3. Confirm the Release `vX.Y.Z` exists with the per-ABI `.so` assets at
+   [github.com/CrunchyMonkies/react-native-duckdb/releases](https://github.com/CrunchyMonkies/react-native-duckdb/releases),
+   and the npm package under
    [github.com/orgs/CrunchyMonkies/packages](https://github.com/orgs/CrunchyMonkies/packages).
 
 ### What the workflow does
 
-1. Checks out the repo **with the DuckDB submodule** (`submodules: recursive`).
-2. Installs JDK 17, Bun, Node, the Android SDK, NDK `27.1.12297006`, and CMake `3.22.1`.
-3. Cross-compiles `libRNDuckDB.so` for **all four ABIs** — `armeabi-v7a`, `x86`, `x86_64`,
-   `arm64-v8a` — by running `:react-native-duckdb:assembleRelease` through the example app's gradle
-   context (the library cannot build standalone because it depends on `react-native-nitro-modules`).
-4. Extracts the per-ABI `.so` from the produced AAR into `package/android/src/main/jniLibs/<abi>/`.
-5. Builds the JS package, scopes the name to `@crunchymonkies/react-native-duckdb`, verifies all
-   four `.so` are in the tarball, and runs `npm publish --ignore-scripts` to GitHub Packages.
+Three jobs:
 
-Authentication uses the built-in `GITHUB_TOKEN` (`packages: write`) — no extra secret is required.
+1. **`release-init`** — reads the version from `package/package.json` and creates the public Release
+   `vX.Y.Z` if it does not already exist (so the parallel build matrix can upload into it).
+2. **`build`** (matrix over `features: [core, all]`) — checks out **with the DuckDB submodule**
+   (`submodules: recursive`); installs JDK 17, Bun `1.3.14`, the Android SDK, NDK `27.1.12297006`,
+   CMake `3.22.1`; then cross-compiles `libRNDuckDB.so` for **all four ABIs** by running
+   `:react-native-duckdb:assembleRelease -PRNDuckDB_prebuilt=false -PDUCKDB_FEATURES=<features>`
+   through the example app's gradle context (the library can't build standalone because it depends on
+   `react-native-nitro-modules`). It extracts each per-ABI `.so` from the AAR, names it
+   `libRNDuckDB-<version>-<features>-<abi>.so`, writes a `.sha256` sidecar, and uploads them to the
+   Release. The `core` and `all` matrix legs run in parallel, so wall-clock ≈ one `all` build.
+3. **`publish-npm`** — builds the JS package, scopes the name to `@crunchymonkies/react-native-duckdb`,
+   and runs `npm publish --ignore-scripts` to GitHub Packages.
 
-### How consumers use the prebuilt package
+Authentication uses the built-in `GITHUB_TOKEN` (`contents: write` for the Release, `packages: write`
+for npm) — no extra secret is required.
 
-The package ships `android/src/main/jniLibs/<abi>/libRNDuckDB.so`. The library's
-`package/android/build.gradle` auto-detects these prebuilt binaries and **skips the CMake source
-build**, so consuming apps do not need the NDK, the DuckDB submodule, or OpenSSL/curl. To force a
-source build instead (e.g. to customize the bundled extensions), set `-PRNDuckDB_prebuilt=false`.
+### How consumers' builds pull the prebuilt library
+
+When a consuming app builds, `package/android/build.gradle` resolves `DUCKDB_FEATURES` (default
+`core`). For `core`/`all` it **attempts to download** the matching prebuilt
+`libRNDuckDB-<version>-<features>-<abi>.so` for each target ABI from the public Release, verifies it
+against the published `.sha256`, and skips the CMake build. No authentication is required (the Release
+assets are public). Downloads are cached under the module's Gradle `build/prebuilt-jniLibs/<features>/`
+directory, so only the first build hits the network.
+
+If `DUCKDB_FEATURES` is a custom list, or a `core`/`all` download fails (offline, missing asset), the
+build **falls back to compiling from source**: it clones DuckDB at the pinned tag (via
+`scripts/clone-duckdb.sh`) when the submodule is absent and compiles the requested extensions.
+Override knobs (env var, `gradle.properties`, or `-P…`):
+
+- `DUCKDB_FEATURES=core|all|<csv>` — feature set (see table above).
+- `RNDuckDB_prebuilt=false` — always build from source, never download.
+- `RNDuckDB_prebuiltVersion=X.Y.Z` — pull a specific release version.
+- `RNDuckDB_prebuiltRepo=owner/repo` — pull from a different repo/fork.
+- `RNDuckDB_prebuiltBaseUrl=URL` — point at a fully custom asset base URL (e.g. a mirror).
 
 ### Limitations
 
-- **Fixed extension set.** The prebuilt `.so` bakes in the extensions configured at build time
-  (currently the example app's set: `core_functions, parquet, json, icu, sqlite_scanner, httpfs,
-  fts, vss`). Consumers cannot reconfigure extensions without a source build
-  (`-PRNDuckDB_prebuilt=false`). `httpfs`/`vss` are unavailable on the 32-bit ABIs by design.
+- **Prebuilt feature sets are fixed.** Only `core` and `all` are published prebuilt; any other set
+  triggers a source build. `httpfs`/`vss` are unavailable on the 32-bit ABIs by design, so the `all`
+  prebuilt for `armeabi-v7a`/`x86` omits httpfs.
+- **Source fallback needs a toolchain + network.** A custom/failed-download build requires git, the
+  NDK, CMake and Node; out-of-tree extensions are git-fetched at CMake time, and `all` additionally
+  builds OpenSSL/curl (64-bit). The `core` fallback is light (in-tree only). DuckDB is **not** shipped
+  in the npm tarball; the fallback clones it on demand. For published consumers, prefer the
+  `core`/`all` prebuilt download and keep the Release assets available for every published version.
 - **Nitro/RN version coupling.** The binaries are compiled against
   `react-native-nitro-modules@0.33.9` / `react-native@0.82.1`. Consuming apps must use compatible
   Nitro and React Native versions, or the native module will fail to load.

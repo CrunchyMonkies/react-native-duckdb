@@ -1,8 +1,13 @@
 name: Production Release (Android · GitHub Packages)
 
-# Cross-compiles the native Android library (libRNDuckDB.so) for every supported
-# ABI, bundles the prebuilt binaries into the npm package, and publishes the scoped
-# package to the CrunchyMonkies GitHub Packages npm registry.
+# Cross-compiles the native Android library (libRNDuckDB.so) for every supported ABI,
+# for each published feature set (core, all), and uploads them as assets on a *public*
+# GitHub Release (vX.Y.Z) so consumer Gradle builds can download the matching binary at
+# build time with no authentication. The scoped npm package
+# (@crunchymonkies/react-native-duckdb) is published to GitHub Packages and carries the
+# Gradle logic that performs that download (and the clone + source-build fallback).
+#
+# Asset naming: libRNDuckDB-<version>-<features>-<abi>.so  (+ .sha256 sidecar)
 #
 # Trigger: push to the `production` branch (version is taken from package/package.json
 # as-is). The existing tag-based release.yml (npm.org, source-only) is left untouched.
@@ -13,7 +18,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # create the GitHub Release that hosts the prebuilt .so assets
   packages: write
 
 concurrency:
@@ -28,9 +33,46 @@ env:
   CMAKE_VERSION: "3.22.1"
 
 jobs:
-  build-and-publish:
+  # 1. Resolve the version and ensure the Release exists, so the parallel build matrix
+  #    can upload assets into it without racing to create it.
+  release-init:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        run: |
+          set -euxo pipefail
+          version="$(cd package && node -p "require('./package.json').version")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure Release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          tag="v${{ steps.version.outputs.version }}"
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" \
+              --target "${GITHUB_SHA}" \
+              --title "${tag}" \
+              --notes "Prebuilt Android native libraries (libRNDuckDB.so) for feature sets: core, all."
+          fi
+
+  # 2. Build the native library for each feature set (core, all) × all ABIs and upload
+  #    the per-ABI .so + .sha256 to the Release.
+  build:
+    needs: release-init
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [core, all]
+    env:
+      VERSION: ${{ needs.release-init.outputs.version }}
     steps:
       - name: Checkout (with DuckDB submodule)
         uses: actions/checkout@v4
@@ -46,14 +88,11 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.1"
-
-      - name: Set up Node (GitHub Packages registry)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@crunchymonkies"
+          # 1.3.1 (the repo's packageManager pin) uses a non-hoisted node_modules
+          # layout that breaks the example's settings.gradle includeBuild of
+          # ../../node_modules/@react-native/gradle-plugin. A newer bun hoists to the
+          # workspace root, which is what the Gradle setup expects.
+          bun-version: "1.3.14"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -71,8 +110,9 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('example/android/**/*.gradle*', 'package/android/**/*.gradle*', 'package/android/CMakeLists.txt') }}
+          key: gradle-${{ runner.os }}-${{ matrix.features }}-${{ hashFiles('example/android/**/*.gradle*', 'package/android/**/*.gradle*', 'package/android/CMakeLists.txt') }}
           restore-keys: |
+            gradle-${{ runner.os }}-${{ matrix.features }}-
             gradle-${{ runner.os }}-
 
       - name: Cache vendored OpenSSL/curl
@@ -81,23 +121,25 @@ jobs:
           path: |
             package/vendor/openssl
             package/vendor/curl
-          key: vendor-${{ runner.os }}-${{ hashFiles('scripts/build-openssl-curl.sh') }}
+          key: vendor-${{ runner.os }}-${{ matrix.features }}-${{ hashFiles('scripts/build-openssl-curl.sh') }}
           restore-keys: |
-            vendor-${{ runner.os }}-
+            vendor-${{ runner.os }}-${{ matrix.features }}-
 
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build native libraries for all ABIs
+      - name: Build native libraries (${{ matrix.features }}) for all ABIs
         working-directory: example/android
         run: |
           set -euxo pipefail
           ./gradlew :react-native-duckdb:assembleRelease \
             -PnewArchEnabled=true \
+            -PRNDuckDB_prebuilt=false \
+            -PDUCKDB_FEATURES="${{ matrix.features }}" \
             -PreactNativeArchitectures="${ABIS}" \
             --no-daemon --stacktrace
 
-      - name: Extract prebuilt .so into jniLibs
+      - name: Stage prebuilt libraries + checksums
         run: |
           set -euxo pipefail
           aar="$(find package/android/build/outputs/aar -name '*-release.aar' | head -n1)"
@@ -108,6 +150,7 @@ jobs:
           echo "Using AAR: ${aar}"
           work="$(mktemp -d)"
           unzip -o "${aar}" -d "${work}" >/dev/null
+          mkdir -p dist
           IFS=',' read -ra abis <<< "${ABIS}"
           for abi in "${abis[@]}"; do
             so="${work}/jni/${abi}/libRNDuckDB.so"
@@ -115,11 +158,41 @@ jobs:
               echo "::error::Missing libRNDuckDB.so for ABI ${abi} in AAR"
               exit 1
             fi
-            mkdir -p "package/android/src/main/jniLibs/${abi}"
-            cp "${so}" "package/android/src/main/jniLibs/${abi}/libRNDuckDB.so"
+            asset="libRNDuckDB-${VERSION}-${{ matrix.features }}-${abi}.so"
+            cp "${so}" "dist/${asset}"
+            ( cd dist && sha256sum "${asset}" > "${asset}.sha256" )
           done
-          echo "Prebuilt libraries staged:"
-          find package/android/src/main/jniLibs -name 'libRNDuckDB.so' -exec ls -lh {} +
+          echo "Release assets staged (${{ matrix.features }}):"
+          ls -lh dist
+
+      # Hosts the prebuilt .so on the *public* GitHub Release so consumer Gradle
+      # builds can download them at build time without any authentication.
+      - name: Upload prebuilt libraries to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "v${VERSION}" dist/* --clobber
+
+  # 3. Publish the scoped npm package once, after both feature sets are built.
+  publish-npm:
+    needs: [release-init, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Set up Node (GitHub Packages registry)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@crunchymonkies"
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
 
       - name: Build JS package
         working-directory: package
@@ -133,21 +206,7 @@ jobs:
           # Done here (not in source package.json) so the npm.org release.yml is unaffected.
           npm pkg set name='@crunchymonkies/react-native-duckdb'
           npm pkg set publishConfig.registry='https://npm.pkg.github.com'
-          echo "Publishing version: $(npm pkg get version | tr -d '\"')"
-
-      - name: Verify prebuilt libs are in the tarball
-        working-directory: package
-        run: |
-          set -euxo pipefail
-          npm pack --dry-run --ignore-scripts > /tmp/pack.txt 2>&1
-          cat /tmp/pack.txt
-          IFS=',' read -ra abis <<< "${ABIS}"
-          for abi in "${abis[@]}"; do
-            if ! grep -q "android/src/main/jniLibs/${abi}/libRNDuckDB.so" /tmp/pack.txt; then
-              echo "::error::Tarball is missing libRNDuckDB.so for ${abi}"
-              exit 1
-            fi
-          done
+          echo "Publishing version: ${{ needs.release-init.outputs.version }}"
 
       - name: Publish to GitHub Packages
         working-directory: package

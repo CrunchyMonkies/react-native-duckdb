@@ -4,8 +4,11 @@ project(RNDuckDB)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_STANDARD 20)
 
-# Path to DuckDB source (submodule at react-native-duckdb/duckdb/)
-set(DUCKDB_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../../duckdb")
+# Path to DuckDB source. build.gradle injects -DDUCKDB_SOURCE_DIR (the resolved monorepo
+# submodule or a package-local clone). Fall back to the in-repo submodule path otherwise.
+if(NOT DEFINED DUCKDB_SOURCE_DIR OR DUCKDB_SOURCE_DIR STREQUAL "")
+  set(DUCKDB_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../../duckdb")
+endif()
 
 # Run extension configuration script to generate extension_config_local.cmake.
 # APP_ROOT_DIR is passed from build.gradle (rootProject.projectDir.parentFile).

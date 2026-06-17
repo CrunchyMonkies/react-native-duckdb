@@ -29,22 +29,178 @@ def getExtOrIntegerDefault(name) {
   return rootProject.ext.has(name) ? rootProject.ext.get(name) : (project.properties["RNDuckDB_" + name]).toInteger()
 }
 
-// Read extensions from gradle.properties (set by Expo config plugin)
-def duckdbExtensions = project.findProperty('RNDuckDB_extensions') ?: ''
+// ---------------------------------------------------------------------------
+// DUCKDB_FEATURES — select the DuckDB feature set for this build.
+//
+//   core   (default)  download the prebuilt "core" release, else clone+build core
+//   all               download the prebuilt "all" release,  else clone+build all
+//   ext_a,ext_b,...   a custom comma-delimited extension list -> always clone+build
+//
+// "core"/"all" map to fixed extension lists (kept in sync with the CI release build).
+// Any other value is treated as an explicit extension list and forces a source build.
+//
+// Resolution order: DUCKDB_FEATURES env var -> -PDUCKDB_FEATURES -> -PRNDuckDB_features
+//   -> legacy -PRNDuckDB_extensions (Expo plugin, treated as a custom list) -> "core".
+//
+// Other knobs:
+//   -PRNDuckDB_prebuilt=false        force a source build, skip the download
+//   -PRNDuckDB_prebuiltVersion=X.Y.Z override the release version to pull (default: package version)
+//   -PRNDuckDB_prebuiltRepo=owner/repo override the GitHub repo to pull from
+//   -PRNDuckDB_prebuiltBaseUrl=URL    override the full release asset base URL
+// ---------------------------------------------------------------------------
+def CORE_FEATURE_SET = "core_functions,parquet,json"
+def ALL_FEATURE_SET = "core_functions,parquet,json,icu,autocomplete,tpch,tpcds,delta,sqlite_scanner,httpfs,fts,vss"
 
-// Prebuilt native libraries: when the package ships compiled libRNDuckDB.so files
-// (published from CI to GitHub Packages), consumers bundle them directly instead of
-// recompiling DuckDB from source via CMake. Opt out with -PRNDuckDB_prebuilt=false.
-def prebuiltJniLibsDir = file("src/main/jniLibs")
-def hasPrebuiltLibs = {
-  prebuiltJniLibsDir.exists() &&
-    !fileTree(dir: prebuiltJniLibsDir, include: "**/libRNDuckDB.so").isEmpty()
+def rawFeatures = System.getenv('DUCKDB_FEATURES') ?:
+  project.findProperty('DUCKDB_FEATURES') ?:
+  project.findProperty('RNDuckDB_features') ?:
+  project.findProperty('RNDuckDB_extensions') ?:
+  'core'
+rawFeatures = rawFeatures.toString().trim()
+def featureKey = rawFeatures.toLowerCase()
+def isPrebuiltVariant = (featureKey == 'core' || featureKey == 'all')
+// Extensions actually compiled when a source build runs.
+def duckdbExtensions = isPrebuiltVariant ?
+  (featureKey == 'all' ? ALL_FEATURE_SET : CORE_FEATURE_SET) : rawFeatures
+logger.lifecycle("[RNDuckDB] DUCKDB_FEATURES='${rawFeatures}' -> extensions: ${duckdbExtensions}")
+
+def rnduckdbVersion = {
+  try {
+    return new groovy.json.JsonSlurper().parse(file("../package.json")).version
+  } catch (Exception e) {
+    return null
+  }
 }()
-def usePrebuilt = project.hasProperty('RNDuckDB_prebuilt')
-  ? project.getProperty('RNDuckDB_prebuilt').toString().toBoolean()
-  : hasPrebuiltLibs
-if (usePrebuilt) {
-  logger.lifecycle("[RNDuckDB] Using prebuilt native libraries from src/main/jniLibs (CMake build skipped)")
+def prebuiltVersion = project.findProperty('RNDuckDB_prebuiltVersion') ?: rnduckdbVersion
+def prebuiltRepo = project.findProperty('RNDuckDB_prebuiltRepo') ?: 'CrunchyMonkies/react-native-duckdb'
+def prebuiltBaseUrl = project.findProperty('RNDuckDB_prebuiltBaseUrl') ?:
+  "https://github.com/${prebuiltRepo}/releases/download/v${prebuiltVersion}"
+def prebuiltDir = file("${buildDir}/prebuilt-jniLibs/${featureKey}")
+def forceSourceBuild = project.hasProperty('RNDuckDB_prebuilt') &&
+  !project.getProperty('RNDuckDB_prebuilt').toString().toBoolean()
+
+// Follows redirects (GitHub release assets 302 to a CDN) and writes atomically.
+def httpDownload
+httpDownload = { String url, File dest ->
+  dest.parentFile.mkdirs()
+  String location = url
+  for (int redirect = 0; redirect < 5; redirect++) {
+    def conn = new URL(location).openConnection()
+    conn.connectTimeout = 15000
+    conn.readTimeout = 120000
+    conn.instanceFollowRedirects = false
+    conn.setRequestProperty("User-Agent", "react-native-duckdb-gradle")
+    int code = conn.responseCode
+    if (code in [301, 302, 303, 307, 308]) {
+      location = conn.getHeaderField("Location")
+      conn.disconnect()
+      continue
+    }
+    if (code != 200) {
+      conn.disconnect()
+      throw new GradleException("HTTP ${code} for ${url}")
+    }
+    def part = new File(dest.parentFile, "${dest.name}.part")
+    conn.inputStream.withCloseable { input ->
+      part.withOutputStream { out -> out << input }
+    }
+    conn.disconnect()
+    if (part.length() == 0) {
+      part.delete()
+      throw new GradleException("Empty download from ${url}")
+    }
+    if (dest.exists()) { dest.delete() }
+    if (!part.renameTo(dest)) { throw new GradleException("Could not finalize ${dest}") }
+    return
+  }
+  throw new GradleException("Too many redirects for ${url}")
+}
+
+def sha256 = { File f ->
+  def md = java.security.MessageDigest.getInstance("SHA-256")
+  f.eachByte(64 * 1024) { buf, len -> md.update(buf, 0, len) }
+  return md.digest().collect { String.format('%02x', it) }.join()
+}
+
+// Returns true only if every required ABI ended up with a verified libRNDuckDB.so.
+def fetchPrebuilt = { List<String> abis ->
+  if (prebuiltVersion == null) {
+    logger.warn("[RNDuckDB] Could not determine package version; skipping prebuilt download.")
+    return false
+  }
+  boolean ok = true
+  abis.each { abi ->
+    def dest = new File(prebuiltDir, "${abi}/libRNDuckDB.so")
+    if (dest.exists() && dest.length() > 0) {
+      return // cached from a previous build
+    }
+    def assetUrl = "${prebuiltBaseUrl}/libRNDuckDB-${prebuiltVersion}-${featureKey}-${abi}.so"
+    try {
+      logger.lifecycle("[RNDuckDB] Downloading prebuilt ${featureKey}/${abi} from ${assetUrl}")
+      httpDownload(assetUrl, dest)
+      // Best-effort integrity check against the published .sha256 sidecar.
+      try {
+        def shaFile = new File("${buildDir}/prebuilt-checksums", "${featureKey}-${abi}.sha256")
+        httpDownload("${assetUrl}.sha256", shaFile)
+        def expected = shaFile.text.trim().split(/\s+/)[0].toLowerCase()
+        def actual = sha256(dest)
+        if (expected && expected != actual) {
+          throw new GradleException("SHA-256 mismatch for ${abi}: expected ${expected}, got ${actual}")
+        }
+        logger.lifecycle("[RNDuckDB] Verified ${abi} (sha256 ${actual})")
+      } catch (GradleException ge) {
+        throw ge
+      } catch (Exception ignored) {
+        logger.warn("[RNDuckDB] No checksum available for ${abi}; skipping verification.")
+      }
+    } catch (Exception e) {
+      logger.warn("[RNDuckDB] Prebuilt download failed for ${abi} (${e.message}); will build from source.")
+      if (dest.exists()) { dest.delete() }
+      ok = false
+    }
+  }
+  return ok
+}
+
+def usePrebuilt = false
+if (forceSourceBuild) {
+  logger.lifecycle("[RNDuckDB] RNDuckDB_prebuilt=false -> building native library from source.")
+} else if (!isPrebuiltVariant) {
+  logger.lifecycle("[RNDuckDB] Custom DUCKDB_FEATURES -> building from source (no prebuilt for custom sets).")
+} else {
+  usePrebuilt = fetchPrebuilt(reactNativeArchitectures() as List<String>)
+  if (usePrebuilt) {
+    logger.lifecycle("[RNDuckDB] Using prebuilt native libraries from ${prebuiltDir} (CMake build skipped).")
+  } else {
+    logger.lifecycle("[RNDuckDB] Falling back to CMake source build for libRNDuckDB.so.")
+  }
+}
+
+// When a source build is required, make sure the DuckDB sources are present. They are a git
+// submodule in this repo, but are NOT shipped in the npm tarball, so for published consumers we
+// clone the pinned tag into a package-local directory and point CMake at it via -DDUCKDB_SOURCE_DIR.
+def duckdbSourceDir = null
+if (!usePrebuilt) {
+  def monorepoDuckdb = file("${projectDir}/../../duckdb")   // submodule in this repo
+  def packageLocalDuckdb = file("${projectDir}/../duckdb")  // clone target for npm consumers
+  if (new File(monorepoDuckdb, "CMakeLists.txt").exists()) {
+    duckdbSourceDir = monorepoDuckdb
+  } else {
+    duckdbSourceDir = packageLocalDuckdb
+    if (!new File(duckdbSourceDir, "CMakeLists.txt").exists()) {
+      def cloneScript = file("${projectDir}/../../scripts/clone-duckdb.sh")
+      logger.lifecycle("[RNDuckDB] DuckDB sources not found; cloning into ${duckdbSourceDir} ...")
+      def result = exec {
+        commandLine "bash", cloneScript.absolutePath, duckdbSourceDir.absolutePath
+        ignoreExitValue = true
+      }
+      if (result.exitValue != 0 || !new File(duckdbSourceDir, "CMakeLists.txt").exists()) {
+        throw new GradleException("[RNDuckDB] Failed to obtain DuckDB sources for the source build. " +
+          "Ensure 'git' is available, or set DUCKDB_FEATURES=core/all to use a prebuilt release.")
+      }
+    }
+  }
+  logger.lifecycle("[RNDuckDB] DuckDB source dir: ${duckdbSourceDir}")
 }
 
 def supportsNamespace() {
@@ -89,6 +245,7 @@ android {
             "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
             "-DAPP_ROOT_DIR=${rootProject.projectDir.parentFile.absolutePath}",
             "-DDUCKDB_EXTENSIONS=${duckdbExtensions}",
+            "-DDUCKDB_SOURCE_DIR=${duckdbSourceDir != null ? duckdbSourceDir.absolutePath : ''}",
             "-DANDROID_NDK_FOR_HTTPFS=${android.ndkDirectory}"
           abiFilters (*reactNativeArchitectures())
         }
@@ -130,6 +287,9 @@ android {
       java.srcDirs += [
         "src/main/kotlin"
       ]
+      if (usePrebuilt) {
+        jniLibs.srcDirs += [prebuiltDir.absolutePath]
+      }
     }
   }
 
