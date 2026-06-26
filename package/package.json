@@ -38,6 +38,8 @@
     "!android/.gradle",
     "!ios/build",
     "!plugin/src",
+    "!vendor/openssl",
+    "!vendor/curl",
     "!**/__tests__",
     "!**/__fixtures__",
     "!**/__mocks__"

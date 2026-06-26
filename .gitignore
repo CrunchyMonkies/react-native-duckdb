@@ -15,9 +15,13 @@ duckdb/build-*/
 duckdb/.extensions-configured
 duckdb/extension/extension_config_local.cmake
 package/DuckDB.xcframework/
+# Package-local DuckDB clone (npm source-build fallback) + its build/config output
+package/duckdb/
 
-# Cross-compiled dependencies (OpenSSL, libcurl for httpfs)
-vendor/
+# Cross-compiled dependencies (OpenSSL, libcurl for httpfs) — build artifacts only.
+# Keep the tracked vendor/duckdb markers (DUCKDB_VERSION) so they ship in the npm tarball.
+vendor/openssl/
+vendor/curl/
 
 # iOS
 example/ios/Podfile.lock

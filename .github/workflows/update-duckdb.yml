@@ -46,7 +46,7 @@ jobs:
 
       - name: Download amalgamation
         if: steps.check.outputs.skip != 'true'
-        run: ./scripts/download-duckdb.sh ${{ steps.target.outputs.version }}
+        run: ./package/scripts/download-duckdb.sh ${{ steps.target.outputs.version }}
 
       - name: Create Pull Request
         if: steps.check.outputs.skip != 'true'

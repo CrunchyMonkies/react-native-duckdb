@@ -121,7 +121,7 @@ jobs:
           path: |
             package/vendor/openssl
             package/vendor/curl
-          key: vendor-${{ runner.os }}-${{ matrix.features }}-${{ hashFiles('scripts/build-openssl-curl.sh') }}
+          key: vendor-${{ runner.os }}-${{ matrix.features }}-${{ hashFiles('package/scripts/build-openssl-curl.sh') }}
           restore-keys: |
             vendor-${{ runner.os }}-${{ matrix.features }}-
 

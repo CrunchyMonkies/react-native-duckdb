@@ -6,31 +6,62 @@ set -euo pipefail
 # Called from RNDuckDB.podspec prepare_command.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-DUCKDB_DIR="${REPO_DIR}/duckdb"
+# Scripts live in <package>/scripts; the package root is one level up.
+PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Resolve the DuckDB sources: prefer the repo-root submodule (dev checkout), else a
+# package-local checkout, cloning the pinned tag on demand (published npm consumers).
+if [ -f "${PACKAGE_DIR}/../duckdb/CMakeLists.txt" ]; then
+  DUCKDB_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)/duckdb"
+else
+  DUCKDB_DIR="${PACKAGE_DIR}/duckdb"
+  if [ ! -f "${DUCKDB_DIR}/CMakeLists.txt" ]; then
+    echo "--- DuckDB sources not found; cloning into ${DUCKDB_DIR} ---"
+    bash "${SCRIPT_DIR}/clone-duckdb.sh" "${DUCKDB_DIR}"
+  fi
+fi
 BUILD_DIR="${DUCKDB_DIR}/build-ios"
 JOBS="$(sysctl -n hw.ncpu)"
 MIN_IOS="${1:-15.1}"
 
 echo "=== react-native-duckdb: Building DuckDB for iOS (min=${MIN_IOS}, jobs=${JOBS}) ==="
+echo "--- DuckDB source dir: ${DUCKDB_DIR} ---"
 
 # Step 1: Configure extensions
 echo "--- Configuring extensions ---"
 
-# Try to read extensions from Podfile.properties.json (Expo managed workflow)
-EXTENSIONS_FROM_PROPS=""
-for CANDIDATE in "${REPO_DIR}/../ios/Podfile.properties.json" "${REPO_DIR}/../../ios/Podfile.properties.json"; do
-  if [ -f "$CANDIDATE" ]; then
-    EXTENSIONS_FROM_PROPS=$(node -e "
-      const p = JSON.parse(require('fs').readFileSync('$CANDIDATE', 'utf8'));
-      if (p['react-native-duckdb.extensions']) process.stdout.write(p['react-native-duckdb.extensions']);
-    " 2>/dev/null || true)
-    break
-  fi
-done
+# Feature-set selection mirrors the Android build (DUCKDB_FEATURES env var).
+# core/all expand to fixed lists; any other value is a custom comma list; empty falls
+# back to Podfile.properties.json / package.json discovery.
+CORE_FEATURE_SET="core_functions,parquet,json"
+# "all" excludes delta (needs Rust+vcpkg) and the unvalidated autocomplete/tpch/tpcds.
+ALL_FEATURE_SET="core_functions,parquet,json,icu,sqlite_scanner,httpfs,fts,vss"
+EXTENSIONS=""
+case "$(printf '%s' "${DUCKDB_FEATURES:-}" | tr '[:upper:]' '[:lower:]')" in
+  core) EXTENSIONS="$CORE_FEATURE_SET" ;;
+  all)  EXTENSIONS="$ALL_FEATURE_SET" ;;
+  "")   EXTENSIONS="" ;;
+  *)    EXTENSIONS="${DUCKDB_FEATURES}" ;;
+esac
 
-if [ -n "$EXTENSIONS_FROM_PROPS" ]; then
-  node "${SCRIPT_DIR}/configure-extensions.js" --duckdb-path "${DUCKDB_DIR}" --extensions "${EXTENSIONS_FROM_PROPS}"
+# When DUCKDB_FEATURES is unset, try Podfile.properties.json (Expo managed workflow).
+if [ -z "$EXTENSIONS" ]; then
+  for CANDIDATE in \
+    "${PACKAGE_DIR}/../ios/Podfile.properties.json" \
+    "${PACKAGE_DIR}/../../ios/Podfile.properties.json" \
+    "${PACKAGE_DIR}/../../../ios/Podfile.properties.json"; do
+    if [ -f "$CANDIDATE" ]; then
+      EXTENSIONS=$(node -e "
+        const p = JSON.parse(require('fs').readFileSync('$CANDIDATE', 'utf8'));
+        if (p['react-native-duckdb.extensions']) process.stdout.write(p['react-native-duckdb.extensions']);
+      " 2>/dev/null || true)
+      break
+    fi
+  done
+fi
+
+if [ -n "$EXTENSIONS" ]; then
+  node "${SCRIPT_DIR}/configure-extensions.js" --duckdb-path "${DUCKDB_DIR}" --extensions "${EXTENSIONS}"
 else
   node "${SCRIPT_DIR}/configure-extensions.js" --duckdb-path "${DUCKDB_DIR}"
 fi
@@ -91,14 +122,14 @@ build_arch() {
     echo "   Building OpenSSL + libcurl for ios-${MAPPED_ARCH}..."
     "${SCRIPT_DIR}/build-openssl-curl.sh" ios "${MAPPED_ARCH}"
     HTTPFS_CMAKE_FLAGS=(
-      -DOPENSSL_ROOT_DIR="${REPO_DIR}/vendor/openssl/ios-${MAPPED_ARCH}"
-      -DOPENSSL_INCLUDE_DIR="${REPO_DIR}/vendor/openssl/ios-${MAPPED_ARCH}/include"
-      -DOPENSSL_SSL_LIBRARY="${REPO_DIR}/vendor/openssl/ios-${MAPPED_ARCH}/lib/libssl.a"
-      -DOPENSSL_CRYPTO_LIBRARY="${REPO_DIR}/vendor/openssl/ios-${MAPPED_ARCH}/lib/libcrypto.a"
+      -DOPENSSL_ROOT_DIR="${PACKAGE_DIR}/vendor/openssl/ios-${MAPPED_ARCH}"
+      -DOPENSSL_INCLUDE_DIR="${PACKAGE_DIR}/vendor/openssl/ios-${MAPPED_ARCH}/include"
+      -DOPENSSL_SSL_LIBRARY="${PACKAGE_DIR}/vendor/openssl/ios-${MAPPED_ARCH}/lib/libssl.a"
+      -DOPENSSL_CRYPTO_LIBRARY="${PACKAGE_DIR}/vendor/openssl/ios-${MAPPED_ARCH}/lib/libcrypto.a"
       -DOPENSSL_USE_STATIC_LIBS=TRUE
-      -DCURL_ROOT="${REPO_DIR}/vendor/curl/ios-${MAPPED_ARCH}"
-      -DCURL_INCLUDE_DIR="${REPO_DIR}/vendor/curl/ios-${MAPPED_ARCH}/include"
-      -DCURL_LIBRARY="${REPO_DIR}/vendor/curl/ios-${MAPPED_ARCH}/lib/libcurl.a"
+      -DCURL_ROOT="${PACKAGE_DIR}/vendor/curl/ios-${MAPPED_ARCH}"
+      -DCURL_INCLUDE_DIR="${PACKAGE_DIR}/vendor/curl/ios-${MAPPED_ARCH}/include"
+      -DCURL_LIBRARY="${PACKAGE_DIR}/vendor/curl/ios-${MAPPED_ARCH}/lib/libcurl.a"
     )
   fi
 
@@ -128,8 +159,8 @@ build_arch() {
 
   # Include vendor OpenSSL + libcurl static libs when httpfs is enabled
   if [ "$NEEDS_HTTPFS" = true ]; then
-    local VENDOR_SSL="${REPO_DIR}/vendor/openssl/ios-${MAPPED_ARCH}/lib"
-    local VENDOR_CURL="${REPO_DIR}/vendor/curl/ios-${MAPPED_ARCH}/lib"
+    local VENDOR_SSL="${PACKAGE_DIR}/vendor/openssl/ios-${MAPPED_ARCH}/lib"
+    local VENDOR_CURL="${PACKAGE_DIR}/vendor/curl/ios-${MAPPED_ARCH}/lib"
     for vendor_lib in "${VENDOR_SSL}/libssl.a" "${VENDOR_SSL}/libcrypto.a" "${VENDOR_CURL}/libcurl.a"; do
       if [ -f "$vendor_lib" ]; then
         ALL_LIBS+=("${vendor_lib}")
@@ -169,9 +200,9 @@ xcodebuild -create-xcframework \
   -output "${BUILD_DIR}/DuckDB.xcframework" \
   2>&1 | tail -3
 
-# Step 4: Copy xcframework into package/ so CocoaPods can find it
-# vendored_frameworks paths must be within the pod source tree
-PACKAGE_DIR="${REPO_DIR}/package"
+# Step 4: Copy xcframework into the package root so CocoaPods can find it
+# (vendored_frameworks paths must be within the pod source tree). PACKAGE_DIR is
+# already the package root (defined at the top of this script).
 rm -rf "${PACKAGE_DIR}/DuckDB.xcframework"
 cp -R "${BUILD_DIR}/DuckDB.xcframework" "${PACKAGE_DIR}/DuckDB.xcframework"
 

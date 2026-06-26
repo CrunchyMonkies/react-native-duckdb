@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 20)
 # Path to DuckDB source. build.gradle injects -DDUCKDB_SOURCE_DIR (the resolved monorepo
 # submodule or a package-local clone). Fall back to the in-repo submodule path otherwise.
 if(NOT DEFINED DUCKDB_SOURCE_DIR OR DUCKDB_SOURCE_DIR STREQUAL "")
-  set(DUCKDB_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../../duckdb")
+  set(DUCKDB_SOURCE_DIR "${CMAKE_SOURCE_DIR}/../duckdb")
 endif()
 
 # Run extension configuration script to generate extension_config_local.cmake.
@@ -16,7 +16,7 @@ endif()
 find_program(NODE_EXECUTABLE node REQUIRED)
 
 set(CONFIGURE_ARGS
-  ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/../../scripts/configure-extensions.js
+  ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/../scripts/configure-extensions.js
   --duckdb-path ${DUCKDB_SOURCE_DIR}
   --app-root ${APP_ROOT_DIR}
 )
@@ -71,9 +71,9 @@ if(EXISTS "${EXT_CONFIG_PATH}")
         set(ENV{ANDROID_NDK_ROOT} "${ANDROID_NDK_FOR_HTTPFS}")
       endif()
 
-      set(VENDOR_DIR "${CMAKE_SOURCE_DIR}/../../vendor")
+      set(VENDOR_DIR "${CMAKE_SOURCE_DIR}/../vendor")
       execute_process(
-        COMMAND bash "${CMAKE_SOURCE_DIR}/../../scripts/build-openssl-curl.sh" android "${ANDROID_ABI}"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/../scripts/build-openssl-curl.sh" android "${ANDROID_ABI}"
         RESULT_VARIABLE _httpfs_deps_result
       )
       if(NOT _httpfs_deps_result EQUAL 0)

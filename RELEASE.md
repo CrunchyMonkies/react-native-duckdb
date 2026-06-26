@@ -107,7 +107,10 @@ carries the JS code plus the Gradle logic that performs the download (and the so
 Feature-set definitions (kept in sync between `package/android/build.gradle` and this workflow):
 
 - **core** = `core_functions,parquet,json`
-- **all**  = `core_functions,parquet,json,icu,autocomplete,tpch,tpcds,delta,sqlite_scanner,httpfs,fts,vss`
+- **all**  = `core_functions,parquet,json,icu,sqlite_scanner,httpfs,fts,vss`
+  (every extension that cross-compiles for Android/iOS; `delta` is excluded — it needs a Rust
+  toolchain + vcpkg — as are the unvalidated `autocomplete`/`tpch`/`tpcds`. Use a custom
+  `DUCKDB_FEATURES` list to add any of those.)
 
 Set it as an environment variable (`DUCKDB_FEATURES=all ./gradlew …` / in CI) or as a Gradle
 property (`-PDUCKDB_FEATURES=all`).
@@ -153,9 +156,12 @@ assets are public). Downloads are cached under the module's Gradle `build/prebui
 directory, so only the first build hits the network.
 
 If `DUCKDB_FEATURES` is a custom list, or a `core`/`all` download fails (offline, missing asset), the
-build **falls back to compiling from source**: it clones DuckDB at the pinned tag (via
-`scripts/clone-duckdb.sh`) when the submodule is absent and compiles the requested extensions.
-Override knobs (env var, `gradle.properties`, or `-P…`):
+build **falls back to compiling from source**. The build scripts ship inside the package
+(`package/scripts`, included in the npm tarball) and the DuckDB sources are cloned at the pinned tag
+on demand (via `package/scripts/clone-duckdb.sh`) into the installed package directory — so the
+source build works from a published install (it just needs network + the native toolchain). iOS uses
+the same mechanism at pod-install time (`package/scripts/build-duckdb-ios.sh`, which also honors
+`DUCKDB_FEATURES`). Override knobs (env var, `gradle.properties`, or `-P…`):
 
 - `DUCKDB_FEATURES=core|all|<csv>` — feature set (see table above).
 - `RNDuckDB_prebuilt=false` — always build from source, never download.

@@ -14,9 +14,10 @@ Pod::Spec.new do |s|
 
   # Build DuckDB from source at pod-install time.
   # Creates DuckDB.xcframework with all configured extensions statically linked.
-  # Scripts and duckdb submodule live at the repo root (one level above package/).
+  # Scripts ship inside the package (package/scripts). The build script resolves the
+  # DuckDB sources from the repo-root submodule (dev) or clones them on demand (npm).
   s.prepare_command = <<-CMD
-    bash ../scripts/build-duckdb-ios.sh #{min_ios_version_supported}
+    bash scripts/build-duckdb-ios.sh #{min_ios_version_supported}
   CMD
 
   s.source_files = [
@@ -41,7 +42,7 @@ Pod::Spec.new do |s|
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
     'CLANG_CXX_LIBRARY' => 'libc++',
     :WARNING_CFLAGS => '-Wno-shorten-64-to-32 -Wno-comma -Wno-unreachable-code -Wno-conditional-uninitialized -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-sign-compare -Wno-unused-parameter -Wno-missing-field-initializers',
-    "HEADER_SEARCH_PATHS" => '"$(PODS_TARGET_SRCROOT)/../duckdb/src/include" "$(PODS_TARGET_SRCROOT)/cpp"',
+    "HEADER_SEARCH_PATHS" => '"$(PODS_TARGET_SRCROOT)/duckdb/src/include" "$(PODS_TARGET_SRCROOT)/../duckdb/src/include" "$(PODS_TARGET_SRCROOT)/cpp"',
   }
 
   load 'nitrogen/generated/ios/RNDuckDB+autolinking.rb'

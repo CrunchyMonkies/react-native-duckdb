@@ -49,7 +49,10 @@ def getExtOrIntegerDefault(name) {
 //   -PRNDuckDB_prebuiltBaseUrl=URL    override the full release asset base URL
 // ---------------------------------------------------------------------------
 def CORE_FEATURE_SET = "core_functions,parquet,json"
-def ALL_FEATURE_SET = "core_functions,parquet,json,icu,autocomplete,tpch,tpcds,delta,sqlite_scanner,httpfs,fts,vss"
+// "all" = every extension that cross-compiles for Android (the maintainer's validated set).
+// Excludes `delta` (needs a Rust toolchain + vcpkg, not available in the NDK build) and the
+// unvalidated `autocomplete`/`tpch`/`tpcds`. Add those to a custom DUCKDB_FEATURES list if needed.
+def ALL_FEATURE_SET = "core_functions,parquet,json,icu,sqlite_scanner,httpfs,fts,vss"
 
 def rawFeatures = System.getenv('DUCKDB_FEATURES') ?:
   project.findProperty('DUCKDB_FEATURES') ?:
@@ -188,7 +191,7 @@ if (!usePrebuilt) {
   } else {
     duckdbSourceDir = packageLocalDuckdb
     if (!new File(duckdbSourceDir, "CMakeLists.txt").exists()) {
-      def cloneScript = file("${projectDir}/../../scripts/clone-duckdb.sh")
+      def cloneScript = file("${projectDir}/../scripts/clone-duckdb.sh")
       logger.lifecycle("[RNDuckDB] DuckDB sources not found; cloning into ${duckdbSourceDir} ...")
       def result = exec {
         commandLine "bash", cloneScript.absolutePath, duckdbSourceDir.absolutePath

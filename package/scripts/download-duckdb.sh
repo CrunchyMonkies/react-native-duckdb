@@ -3,8 +3,9 @@ set -euo pipefail
 
 VERSION="${1:-v1.4.4}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-VENDOR_DIR="$ROOT_DIR/package/vendor/duckdb"
+# Scripts live in <package>/scripts, so the package root is one level up.
+PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
+VENDOR_DIR="$PACKAGE_DIR/vendor/duckdb"
 TMP_DIR=$(mktemp -d)
 
 cleanup() {

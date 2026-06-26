@@ -7,16 +7,17 @@
 # set, or a prebuilt release download failed. No-op if the target already has CMakeLists.txt.
 #
 # Usage: clone-duckdb.sh <target-dir> [version]
-#   version defaults to the contents of package/vendor/duckdb/DUCKDB_VERSION (e.g. v1.4.4).
+#   version defaults to the contents of <package>/vendor/duckdb/DUCKDB_VERSION (e.g. v1.4.4).
 set -euo pipefail
 
 TARGET_DIR="${1:?usage: clone-duckdb.sh <target-dir> [version]}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+# Scripts live in <package>/scripts, so the package root is one level up.
+PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
 
 VERSION="${2:-}"
 if [ -z "$VERSION" ]; then
-  VERSION_FILE="$ROOT_DIR/package/vendor/duckdb/DUCKDB_VERSION"
+  VERSION_FILE="$PACKAGE_DIR/vendor/duckdb/DUCKDB_VERSION"
   if [ -f "$VERSION_FILE" ]; then
     VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
   else

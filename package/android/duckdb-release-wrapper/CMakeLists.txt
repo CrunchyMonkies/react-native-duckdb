@@ -19,5 +19,9 @@ if(_VSS_ENABLED)
   add_compile_options(-include "${CMAKE_CURRENT_SOURCE_DIR}/aligned_alloc_shim.h")
 endif()
 
-set(DUCKDB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../duckdb")
+# Inherit DUCKDB_SOURCE_DIR from the parent CMakeLists (set by build.gradle: the
+# monorepo submodule or a package-local clone). Only fall back if invoked standalone.
+if(NOT DEFINED DUCKDB_SOURCE_DIR OR DUCKDB_SOURCE_DIR STREQUAL "")
+  set(DUCKDB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../duckdb")
+endif()
 add_subdirectory(${DUCKDB_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/duckdb)
