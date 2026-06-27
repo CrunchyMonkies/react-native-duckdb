@@ -20,12 +20,12 @@
   "dependencies": {
     "react": "19.1.1",
     "react-native": "0.82.1",
-    "react-native-nitro-modules": "0.33.9"
+    "react-native-nitro-modules": "0.35.9"
   },
   "devDependencies": {
     "@react-native/babel-preset": "0.82.1",
     "@react-native/metro-config": "0.82.1",
-    "nitrogen": "0.33.9",
+    "nitrogen": "0.35.9",
     "prettier": "^3.6.2",
     "typescript": "^5.8.3"
   }

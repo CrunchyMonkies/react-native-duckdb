@@ -46,11 +46,97 @@ Download DuckDB Explorer — a free companion app to try everything before writi
 
 ## Installation
 
+There are two ways to install, depending on whether you want to **build the native library from source** or **download prebuilt Android binaries**. Both ship the same JavaScript/TypeScript API.
+
+### Option A — Public npm (builds from source)
+
 ```bash
 npm install react-native-duckdb react-native-nitro-modules
 ```
 
-For iOS, run `pod install` after installation.
+DuckDB is cloned and compiled the first time you build the app. Android needs `git`, the Android NDK and CMake; iOS builds at `pod install` time and needs Xcode. For iOS, run `pod install` after installing.
+
+### Option B — GitHub Packages (prebuilt Android binaries)
+
+The `@crunchymonkies/react-native-duckdb` package is published to GitHub Packages and ships the Gradle logic that downloads prebuilt per-ABI Android binaries (`.so`) from the [CrunchyMonkies releases](https://github.com/CrunchyMonkies/react-native-duckdb/releases), falling back to a source build if a download isn't available.
+
+Add a scope mapping to your project `.npmrc` so npm resolves `@crunchymonkies` from GitHub Packages:
+
+```ini
+@crunchymonkies:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+`GITHUB_TOKEN` must be a GitHub personal access token with the `read:packages` scope (required to install from GitHub Packages — the prebuilt `.so` themselves are on public Releases and need no auth). Then:
+
+```bash
+npm install @crunchymonkies/react-native-duckdb react-native-nitro-modules
+```
+
+Import from the scoped name in this case:
+
+```ts
+import { HybridDuckDB } from '@crunchymonkies/react-native-duckdb'
+```
+
+For iOS, run `pod install` — iOS always builds from source (see [Native Build & Distribution](#native-build--distribution)).
+
+## Native Build & Distribution
+
+On **Android**, the native DuckDB library is either **downloaded prebuilt** or **compiled from source**. On **iOS**, it is always compiled from source at `pod install` time. Both platforms honor the same `DUCKDB_FEATURES` selection.
+
+### Feature sets — `DUCKDB_FEATURES`
+
+| `DUCKDB_FEATURES` | Behavior |
+| --- | --- |
+| `core` (default) | Download the prebuilt **core** release; on failure → clone DuckDB and source-build the core set |
+| `all` | Download the prebuilt **all** release; on failure → clone DuckDB and source-build the full set |
+| `ext_a,ext_b,…` | Always source-build exactly the extensions you list |
+
+- **core** = `core_functions,parquet,json`
+- **all** = `core_functions,parquet,json,icu,sqlite_scanner,httpfs,fts,vss`
+
+`delta`, `autocomplete`, `tpch` and `tpcds` are excluded from `all` (they need extra toolchains or are unvalidated) — pass an explicit comma-separated list to source-build them.
+
+Set it via environment variable or Gradle property:
+
+```bash
+# Environment variable (Android + iOS)
+DUCKDB_FEATURES=all npx react-native run-android
+
+# Gradle property
+./gradlew :react-native-duckdb:assembleRelease -PDUCKDB_FEATURES=all
+```
+
+Expo apps set the extension list through the config plugin (see the [Extensions](#extensions) section); iOS additionally reads the env var / `Podfile.properties.json`.
+
+### Prebuilt binaries
+
+Prebuilt Android binaries are published per release to **CrunchyMonkies**:
+
+- **Releases (binaries):** https://github.com/CrunchyMonkies/react-native-duckdb/releases — per-ABI assets named `libRNDuckDB-<version>-<features>-<abi>.so` with a `.sha256` sidecar that the build verifies.
+- **Package (GitHub Packages):** https://github.com/orgs/CrunchyMonkies/packages — the `@crunchymonkies/react-native-duckdb` npm package.
+
+### Build override knobs (Android)
+
+Set via environment variable, `gradle.properties`, or `-P` flags:
+
+| Property | Effect |
+| --- | --- |
+| `RNDuckDB_prebuilt=false` | Force a source build, skip the prebuilt download |
+| `RNDuckDB_prebuiltVersion` | Release version to pull (default: the package version) |
+| `RNDuckDB_prebuiltRepo` | GitHub repo to pull from (default: `CrunchyMonkies/react-native-duckdb`) |
+| `RNDuckDB_prebuiltBaseUrl` | Full base URL for assets (default: `https://github.com/<repo>/releases/download/v<version>`) |
+
+### Caveats
+
+- Only `core` and `all` are published as prebuilt; any custom feature list triggers a source build.
+- `httpfs`/`vss` are unavailable on the 32-bit ABIs, so the `all` prebuilt omits them on `armeabi-v7a`/`x86`.
+- A source fallback needs the toolchain (git, NDK, CMake, Node) and network access; out-of-tree extensions are fetched at build time and `all` also builds OpenSSL/curl. DuckDB is **not** shipped in the npm tarball — it is cloned on demand.
+- **Nitro/RN version coupling.** The binaries are compiled against `react-native-nitro-modules@0.35.9` / `react-native@0.82.1`. Consuming apps must use compatible Nitro and React Native versions or the native module will fail to load.
+- iOS is not covered by the prebuilt flow; it always builds from source at pod-install time.
+
+See [RELEASE.md](RELEASE.md) for the full release and build reference.
 
 ## Quick Start
 
@@ -229,7 +315,7 @@ See [docs/vss.md](docs/vss.md) for distance metrics, use cases, and HNSW tuning.
 
 ## Extensions
 
-Extensions are statically linked at build time. Configure in `package.json` (bare) or `app.json` (Expo):
+Extensions are statically linked at build time, which means your selection also determines whether a prebuilt binary can be used or a source build is required — see [Native Build & Distribution](#native-build--distribution) and the `DUCKDB_FEATURES` feature sets. Configure in `package.json` (bare) or `app.json` (Expo):
 
 ```json
 {

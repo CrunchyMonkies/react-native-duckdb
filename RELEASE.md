@@ -180,7 +180,7 @@ the same mechanism at pod-install time (`package/scripts/build-duckdb-ios.sh`, w
   in the npm tarball; the fallback clones it on demand. For published consumers, prefer the
   `core`/`all` prebuilt download and keep the Release assets available for every published version.
 - **Nitro/RN version coupling.** The binaries are compiled against
-  `react-native-nitro-modules@0.33.9` / `react-native@0.82.1`. Consuming apps must use compatible
+  `react-native-nitro-modules@0.35.9` / `react-native@0.82.1`. Consuming apps must use compatible
   Nitro and React Native versions, or the native module will fail to load.
 - **Scoped name.** GitHub Packages requires the org scope, so the install/import name is
   `@crunchymonkies/react-native-duckdb` (the public npm package remains `react-native-duckdb`).
